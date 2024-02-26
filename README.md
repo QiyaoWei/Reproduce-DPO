@@ -3,7 +3,7 @@ This repo is meant to be a from-scratch implementation to reproduce the IMDB Exp
 
 1. According to the paper, they first SFT a base gpt2-large on IMDB for one epoch, and they also provide the model checkpoint. Instead, I decided to use a well-known gpt-imdb model from lvwerra to avoid SFT. Otherwise, the data generation process is exactly as the paper describes, where we end up with 4 samples for each of the ~25k prefixes.
 
-2. The first step in reproducing is to run `generate_preference_pairs.py`. Again, there is no difference between the code here and the paper, and we end up with 6 preference pairs for each of the ~25k prefixes we generated, totalling to ~150k rows of data. Link to my generated data ![here](https://huggingface.co/datasets/QiyaoWei/Reproducing-DPO)
+2. The first step in reproducing is to run `generate_preference_pairs.py`. Again, there is no difference between the code here and the paper, and we end up with 6 preference pairs for each of the ~25k prefixes we generated, totalling to ~150k rows of data. Link to my generated data [here](https://huggingface.co/datasets/QiyaoWei/Reproducing-DPO)
 
 3. Now we can train DPO. This can be done on your favorite training library. Here, I do it on TRL, and write a short eval function to plot the rewards against KL averaged over the entire eval dataset. For reference, I split my data into ~100k training data and ~50k for evaluation.
 
