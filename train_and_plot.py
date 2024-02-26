@@ -89,53 +89,94 @@ if __name__ == "__main__":
     trainer.custom_eval(str(args.beta))
 
 # where custom_eval is defined like
-def custom_eval(
-    self, beta,
-    eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
-    metric_key_prefix: str = "eval",
-) -> Dict[str, float]:
-    eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
-    print(isinstance(eval_dataset, dict))
-    if isinstance(eval_dataset, dict):
-        metrics = {}
-        for eval_dataset_name, _eval_dataset in eval_dataset.items():
-            dataset_metrics = self.custom_eval(
-                eval_dataset=_eval_dataset,
-                metric_key_prefix=f"{metric_key_prefix}_{eval_dataset_name}",
-            )
-            metrics.update(dataset_metrics)
-        return metrics
+# def custom_eval(
+#     self, beta,
+#     eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
+#     metric_key_prefix: str = "eval",
+# ) -> Dict[str, float]:
+#     eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
+#     print(isinstance(eval_dataset, dict))
+#     if isinstance(eval_dataset, dict):
+#         metrics = {}
+#         for eval_dataset_name, _eval_dataset in eval_dataset.items():
+#             dataset_metrics = self.custom_eval(
+#                 eval_dataset=_eval_dataset,
+#                 metric_key_prefix=f"{metric_key_prefix}_{eval_dataset_name}",
+#             )
+#             metrics.update(dataset_metrics)
+#         return metrics
 
-    # memory metrics - must set up as early as possible
-    self._memory_tracker.start()
+#     # memory metrics - must set up as early as possible
+#     self._memory_tracker.start()
 
-    eval_dataloader = self.get_eval_dataloader(eval_dataset)
-    start_time = time.time()
+#     eval_dataloader = self.get_eval_dataloader(eval_dataset)
+#     start_time = time.time()
 
-    all_logits = list()
-    all_rewards = list()
-    reward_pipe = pipeline("text-classification", model="siebert/sentiment-roberta-large-english")
-    reward_kwargs = {"top_k": None, "function_to_apply": "none", "batch_size": 16}
-    gen_kwargs = {"min_length": -1, "top_k": 0.0, "top_p": 1.0, "do_sample": True, "pad_token_id": self.tokenizer.eos_token_id, "max_new_tokens": 20}
-    for step, batch in enumerate(eval_dataloader):
+#     all_logits = list()
+#     all_rewards = list()
+#     reward_pipe = pipeline("text-classification", model="siebert/sentiment-roberta-large-english")
+#     reward_kwargs = {"top_k": None, "function_to_apply": "none", "batch_size": 16}
+#     gen_kwargs = {"min_length": -1, "top_k": 0.0, "top_p": 1.0, "do_sample": True, "pad_token_id": self.tokenizer.eos_token_id, "max_new_tokens": 20}
+#     for step, batch in enumerate(eval_dataloader):
 
-        (policy_chosen_logps, policy_rejected_logps, _, _,) = self.concatenated_forward(self.model, batch)
-        (reference_chosen_logps, reference_rejected_logps, _, _,) = self.concatenated_forward(self.ref_model, batch)
-        pi_logratios = policy_chosen_logps - policy_rejected_logps
-        ref_logratios = reference_chosen_logps - reference_rejected_logps
-        logits = pi_logratios - ref_logratios
-        encoding = self.tokenizer(batch["prompt"], return_tensors="pt").to("cuda")
+#         (policy_chosen_logps, policy_rejected_logps, _, _,) = self.concatenated_forward(self.model, batch)
+#         (reference_chosen_logps, reference_rejected_logps, _, _,) = self.concatenated_forward(self.ref_model, batch)
+#         pi_logratios = policy_chosen_logps - policy_rejected_logps
+#         ref_logratios = reference_chosen_logps - reference_rejected_logps
+#         logits = pi_logratios - ref_logratios
+#         encoding = self.tokenizer(batch["prompt"], return_tensors="pt").to("cuda")
 
-        output = self.model.generate(encoding["input_ids"], **gen_kwargs).squeeze()[-gen_kwargs["max_new_tokens"]:]
-        # outputs = self.tokenizer.batch_decode(self.model.generate(**encoding, max_new_tokens=512), skip_special_tokens=True)
-        response = self.tokenizer.decode(output)
-        rewards = reward_pipe(response, **reward_kwargs)
-        all_logits.append(logits.detach().cpu().item())
-        all_rewards.append(rewards)
-        del policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps, pi_logratios, ref_logratios, encoding, output, response, logits, rewards
+#         output = self.model.generate(encoding["input_ids"], **gen_kwargs).squeeze()[-gen_kwargs["max_new_tokens"]:]
+#         # outputs = self.tokenizer.batch_decode(self.model.generate(**encoding, max_new_tokens=512), skip_special_tokens=True)
+#         response = self.tokenizer.decode(output)
+#         rewards = reward_pipe(response, **reward_kwargs)
+#         all_logits.append(logits.detach().cpu().item())
+#         all_rewards.append(rewards)
+#         del policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps, pi_logratios, ref_logratios, encoding, output, response, logits, rewards
 
-    self.log({"kl": all_logits, "rewards": all_rewards})
-    with open(str(beta) + 'logits.json', 'w', encoding='utf-8') as f:
-        json.dump(all_logits, f, ensure_ascii=False, indent=4)
-    with open(str(beta) + 'rewards.json', 'w', encoding='utf-8') as f:
-        json.dump(all_rewards, f, ensure_ascii=False, indent=4)
+#     self.log({"kl": all_logits, "rewards": all_rewards})
+#     with open(str(beta) + 'logits.json', 'w', encoding='utf-8') as f:
+#         json.dump(all_logits, f, ensure_ascii=False, indent=4)
+#     with open(str(beta) + 'rewards.json', 'w', encoding='utf-8') as f:
+#         json.dump(all_rewards, f, ensure_ascii=False, indent=4)
+
+# And plotting is defined like
+# import json
+# import numpy as np
+# import matplotlib.pyplot as plt
+# import scipy
+# import scienceplots
+
+# betas = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+# total_kl = list()
+# total_rewards = list()
+
+# for beta in betas:
+    
+#     data = open(str(beta) + "rewards.json")
+#     data = json.load(data)
+#     rewards = list()
+#     for i in data:
+#         if i[0]["label"] == "POSITIVE":
+#             rewards.append(i[0]["score"])
+#         else:
+#             assert i[1]["label"] == "POSITIVE"
+#             rewards.append(i[1]["score"])
+#     total_rewards.append(rewards)
+    
+#     data = open(str(beta) + "logits.json")
+#     data = json.load(data)
+#     total_kl.append(data)
+    
+# total_rewards_std = scipy.stats.sem(total_rewards, axis=1)
+# total_rewards = np.mean(total_rewards, axis=1)
+# total_kl_std = scipy.stats.sem(total_kl, axis=1)
+# total_kl = np.mean(total_kl, axis=1)
+
+# plt.style.use("science")
+# plt.figure()
+# plt.scatter(total_kl, total_rewards)
+# plt.xlabel("KL Divergence")
+# plt.ylabel("Reward")
+# plt.title("IMDb Sentiment Generation")
+# plt.savefig("kl_vs_rewards.png")
