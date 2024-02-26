@@ -111,5 +111,5 @@ for i in range(len(data)):
     final.append({"prompt": data["query"][i], "chosen": d[indices[2]], "rejected": d[indices[3]]})
 
 # These are your final preference pairs, there should be ~150k of them
-with open('test.json', 'w', encoding='utf-8') as f:
+with open('data.json', 'w', encoding='utf-8') as f:
     json.dump(final, f, ensure_ascii=False, indent=4)
