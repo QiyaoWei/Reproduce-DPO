@@ -88,9 +88,9 @@ if __name__ == "__main__":
     tokenizer.save_pretrained(output_dir)
     trainer.custom_eval(str(args.beta))
 
-# where custom_eval is defined like
+# # where custom_eval is defined like
 # def custom_eval(
-#     self, beta,
+#     self, beta, secret_sauce,
 #     eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
 #     metric_key_prefix: str = "eval",
 # ) -> Dict[str, float]:
@@ -112,66 +112,86 @@ if __name__ == "__main__":
 #     eval_dataloader = self.get_eval_dataloader(eval_dataset)
 #     start_time = time.time()
 
-#     all_logits = list()
-#     all_rewards = list()
+#     all_results = list()
 #     reward_pipe = pipeline("text-classification", model="siebert/sentiment-roberta-large-english")
 #     reward_kwargs = {"top_k": None, "function_to_apply": "none", "batch_size": 16}
-#     gen_kwargs = {"min_length": -1, "top_k": 0.0, "top_p": 1.0, "do_sample": True, "pad_token_id": self.tokenizer.eos_token_id, "max_new_tokens": 20}
+#     gen_kwargs = {"min_length": -1, "top_k": 0.0, "top_p": 1.0, "do_sample": True,
+#                   "pad_token_id": self.tokenizer.eos_token_id, "max_new_tokens": 20, "output_logits": True}
 #     for step, batch in enumerate(eval_dataloader):
 
-#         (policy_chosen_logps, policy_rejected_logps, _, _,) = self.concatenated_forward(self.model, batch)
-#         (reference_chosen_logps, reference_rejected_logps, _, _,) = self.concatenated_forward(self.ref_model, batch)
-#         pi_logratios = policy_chosen_logps - policy_rejected_logps
-#         ref_logratios = reference_chosen_logps - reference_rejected_logps
-#         logits = pi_logratios - ref_logratios
+#         # encoding \in R^{batch_size x input_length}
 #         encoding = self.tokenizer(batch["prompt"], return_tensors="pt").to("cuda")
+        
+#         # generation \in R^{batch_size x output_length}
+#         generation_output = self.model.generate(**encoding, pad_token_id=self.tokenizer.eos_token_id)#, return_dict_in_generate=True) #, output_logits=True)
+#         abridged_output = generation_output[-gen_kwargs["max_new_tokens"]:]
+        
+#         # response \in R^{batch_size} (natural language space)
+#         response = self.tokenizer.batch_decode(abridged_output, skip_special_tokens=True)
+        
 
-#         output = self.model.generate(encoding["input_ids"], **gen_kwargs).squeeze()[-gen_kwargs["max_new_tokens"]:]
-#         # outputs = self.tokenizer.batch_decode(self.model.generate(**encoding, max_new_tokens=512), skip_special_tokens=True)
-#         response = self.tokenizer.decode(output)
+
+#         model_forward = self.model(input_ids=abridged_output)
+#         ref_model_forward = self.ref_model(input_ids=abridged_output)
+#         # print(model_forward.logits.shape)
+#         # print(ref_model_forward.logits.shape)
+        
+#         model_logps = torch.gather(model_forward.logits[:, :-1, :].log_softmax(-1), dim=2, index=abridged_output[:, 1:].unsqueeze(2)).squeeze(2)
+#         ref_model_logps = torch.gather(ref_model_forward.logits[:, :-1, :].log_softmax(-1), dim=2, index=abridged_output[:, 1:].unsqueeze(2)).squeeze(2)
+        
+#         # calculate kl and reward
+#         naive_kl = (model_logps-ref_model_logps).sum().detach().cpu().item()
+#         full_kl = torch.nn.functional.kl_div(ref_model_logps, model_logps, log_target=True, reduction="none").sum().detach().cpu().item()
+#         # Note: if we want full kl then we need
+#         # Flip is required due to this issue? :https://github.com/pytorch/pytorch/issues/57459
+#         # return F.kl_div(ref_logprob, logprob, log_target=True, reduction="none").sum(-1)
+
 #         rewards = reward_pipe(response, **reward_kwargs)
-#         all_logits.append(logits.detach().cpu().item())
-#         all_rewards.append(rewards)
-#         del policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps, pi_logratios, ref_logratios, encoding, output, response, logits, rewards
+#         all_results.append({"kl": [naive_kl, full_kl], "rewards": rewards, "response": response})
 
-#     self.log({"kl": all_logits, "rewards": all_rewards})
-#     with open(str(beta) + 'logits.json', 'w', encoding='utf-8') as f:
-#         json.dump(all_logits, f, ensure_ascii=False, indent=4)
-#     with open(str(beta) + 'rewards.json', 'w', encoding='utf-8') as f:
-#         json.dump(all_rewards, f, ensure_ascii=False, indent=4)
 
-# And plotting is defined like
+#     self.log({"results": all_results})
+#     with open(str(beta) + str(secret_sauce) + 'results.json', 'w', encoding='utf-8') as f:
+#         json.dump(all_results, f, ensure_ascii=False, indent=4)
+
+# # And plotting is defined like
 # import json
 # import numpy as np
 # import matplotlib.pyplot as plt
 # import scipy
 # import scienceplots
 
-# betas = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+# betas = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+# ps = [0.0] #[0.0, 0.001, 0.0001, 0.00001, 0.000001, 0.0000001, 0.00000001, 0.000000001, 0.0000000001] #"0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0"
+# folder_name = "./"
+
 # total_kl = list()
 # total_rewards = list()
 
 # for beta in betas:
-    
-#     data = open(str(beta) + "rewards.json")
-#     data = json.load(data)
-#     rewards = list()
-#     for i in data:
-#         if i[0]["label"] == "POSITIVE":
-#             rewards.append(i[0]["score"])
-#         else:
-#             assert i[1]["label"] == "POSITIVE"
-#             rewards.append(i[1]["score"])
-#     total_rewards.append(rewards)
-    
-#     data = open(str(beta) + "logits.json")
-#     data = json.load(data)
-#     total_kl.append(data)
+#     for p in ps:
+        
+#         data = open(folder_name + str(beta) + str(p) + "results.json")
+#         data = json.load(data)
+#         rewards = list()
+#         kl = list()
+#         for i in data:
+#             if i["rewards"][0][0]["label"] == "POSITIVE":
+#                 rewards.append(i["rewards"][0][0]["score"])
+#             else:
+#                 assert i["rewards"][0][1]["label"] == "POSITIVE"
+#                 rewards.append(i["rewards"][0][1]["score"])
+#             kl.append(i["kl"][1])
+#         total_rewards.append(rewards)
+#         total_kl.append(kl)
+#         print(beta, np.mean(rewards), np.mean(total_kl))
     
 # total_rewards_std = scipy.stats.sem(total_rewards, axis=1)
 # total_rewards = np.mean(total_rewards, axis=1)
 # total_kl_std = scipy.stats.sem(total_kl, axis=1)
 # total_kl = np.mean(total_kl, axis=1)
+# print(total_rewards)
+# print(total_kl)
 
 # plt.style.use("science")
 # plt.figure()
