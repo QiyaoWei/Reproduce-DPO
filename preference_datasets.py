@@ -166,7 +166,7 @@ def get_imdb(split: str, silent: bool = False, cache_dir: str = None) -> Dict[st
     """
     print(f'Loading IMDB RLHF dataset...')
     # dataset = datasets.load_dataset('Anthropic/hh-rlhf', split=split, cache_dir=cache_dir)
-    dataset = datasets.load_dataset("csv", data_files="misc/imdb_rlhf_pairs.csv")['train']
+    dataset = datasets.load_dataset("csv", data_files=cache_dir)['train']
     print('done')
 
     def split_prompt_and_responses(ex):

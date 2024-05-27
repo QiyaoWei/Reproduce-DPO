@@ -1,0 +1,1 @@
+ulimit -n 64000; python -u train.py model=gpt2_large datasets=[imdb] loss=dpo fsdp_port=49155 loss.beta=0.1 exp_name=imdb_mine_reverse_kl_gpt2_large gradient_accumulation_steps=2 batch_size=64 eval_batch_size=64 trainer=BasicTrainer sample_during_eval=false model.fsdp_policy_mp=bfloat16  eval_every=4000

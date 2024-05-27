@@ -29,12 +29,12 @@ print('Saving to:')
 print(os.path.join(root_dit, f'{step_idxs}.txt'))
 print('*' * 80  + '\n')
 path = os.path.join(root_dit, f'{step_idxs}.txt')
-if not os.path.exists(path):
-    print(f"The file does not exist. Continue running your process.")
-    # Insert the code to run your process here
-else:
-    print(f"The file {path} exists. Exit the process.")
-    exit() # Use sys.exit() if this doesn't work
+# if not os.path.exists(path):
+#     print(f"The file does not exist. Continue running your process.")
+#     # Insert the code to run your process here
+# else:
+#     print(f"The file {path} exists. Exit the process.")
+#     exit() # Use sys.exit() if this doesn't work
 
 
 torch.backends.cudnn.deterministic = True
@@ -138,7 +138,7 @@ with torch.no_grad():
 average_reward = total_reward / total_num_items
 print(f'Averaged reward: {average_reward}')
 
-with open(os.path.join(root_dit, f'{step_idxs}.txt'), 'w') as f: 
+with open(os.path.join(root_dit, f'{step_idxs}.txt'), 'a') as f: 
     f.write(f'Averaged reward: {average_reward}\n')
 
 

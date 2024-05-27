@@ -1,0 +1,45 @@
+seed: 0
+exp_name: imdb_mine_reverse_kl_gpt2_large
+batch_size: 64
+eval_batch_size: 64
+debug: false
+fsdp_port: 49155
+datasets:
+- imdb
+wandb:
+  enabled: true
+  entity: null
+  project: mine
+local_dirs:
+- /scr-ssd
+- /scr
+- /mnt/pdata/qw281/azureuser
+sample_during_eval: false
+do_first_eval: true
+local_run_dir: ${get_local_run_dir:${exp_name},${local_dirs}}
+lr: 5.0e-07
+gradient_accumulation_steps: 2
+max_grad_norm: 10.0
+max_length: 512
+max_prompt_length: 256
+n_epochs: 1
+n_examples: null
+n_eval_examples: 256
+trainer: BasicTrainer
+optimizer: RMSprop
+warmup_steps: 150
+activation_checkpointing: false
+eval_every: 4000
+minimum_log_interval_secs: 1.0
+model:
+  name_or_path: gpt2-large
+  tokenizer_name_or_path: null
+  archive: null
+  block_name: GPT2Block
+  policy_dtype: float32
+  fsdp_policy_mp: bfloat16
+  reference_dtype: float16
+loss:
+  name: dpo
+  beta: 0.1
+  reference_free: false
