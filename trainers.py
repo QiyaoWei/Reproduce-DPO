@@ -273,10 +273,29 @@ class BasicTrainer(object):
         if self.config.loss.name == 'dpo':
             self.reference_model.eval()
 
-        self.example_counter = 0
+        # This is never used in training, and serves the sole purpose of data generation
+        self.original_data = list(get_batch_iterator(**self.data_iterator_kwargs, split='train', n_epochs=self.config.n_epochs, n_examples=self.config.n_examples, batch_size=self.config.batch_size, cache_dir="misc/imdb_rlhf_pairs.csv"))
         self.batch_counter = 0
+        self.example_counter = 0
+        self.train_iterator = self.train_iterator[:1000]
+        # self.example_counter = 0
+        self.iteration = "one"
+        self.subtrain()
+        # self.example_counter = 0
+        self.iteration = "two"
+        self.subtrain()
+        # self.example_counter = 0
+        self.iteration = "three"
+        self.subtrain()
+        # self.example_counter = 0
+        self.iteration = "four"
+        self.subtrain()
+        # self.example_counter = 0
+        self.iteration = "five"
+        self.subtrain()
+        
+    def subtrain(self):
         last_log = None
-
         for batch in self.train_iterator:
             #### BEGIN EVALUATION ####
             if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
@@ -378,492 +397,25 @@ class BasicTrainer(object):
             else:
                 rank0_print(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
             #### END TRAINING ####
-            if self.example_counter > 10000:
-                break
-            
-        rank0_print('Training complete!')
-        new_data = {"Prompt":[], "positive_response":[], "negative_response":[]}
-        for batch in self.train_iterator:
-            with torch.no_grad():
-                chosen_generated_ids = self.policy.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
-                chosen_generated_texts = self.tokenizer.batch_decode(chosen_generated_ids, skip_special_tokens=True)
-                rejected_generated_ids = self.reference_model.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
-                rejected_generated_texts = self.tokenizer.batch_decode(rejected_generated_ids, skip_special_tokens=True)
-            new_data["Prompt"].extend(batch["prompt"])
-            new_data["positive_response"].extend(chosen_generated_texts)
-            new_data["negative_response"].extend(rejected_generated_texts)
-
-        new_df = pd.DataFrame(new_data)
-        new_df.to_csv("misc/imdb_rlhf_pairs_iterone.csv", index=False)
-        self.train_iterator = list(get_batch_iterator(**self.data_iterator_kwargs, split='train', n_epochs=self.config.n_epochs, n_examples=self.config.n_examples, batch_size=self.config.batch_size, cache_dir="misc/imdb_rlhf_pairs_iterone.csv"))
-        self.reference_model = self.policy
-        
-        for batch in self.train_iterator:
-            #### BEGIN EVALUATION ####
-            if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
-                rank0_print(f'Running evaluation after {self.example_counter} train examples')
-                self.policy.eval()
-
-                all_eval_metrics = defaultdict(list)
-                if self.config.sample_during_eval:
-                    all_policy_samples, all_reference_samples = [], []
-                    policy_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-                    if self.config.loss.name == 'dpo':
-                        reference_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-
-                for eval_batch in (tqdm.tqdm(self.eval_iterator) if self.rank == 0 else self.eval_iterator):
-                    local_eval_batch = slice_and_move_batch_for_device(eval_batch, self.rank, self.world_size, self.rank)
-                    with torch.no_grad():
-                        _, eval_metrics = self.get_batch_metrics(local_eval_batch, self.config.loss, train=False)
-
-                    for k, v in eval_metrics.items():
-                        all_eval_metrics[k].extend(v)
-
-                    if self.config.sample_during_eval:
-                        if 'FSDP' in self.config.trainer:
-                            with FSDP.summon_full_params(self.policy, writeback=False, recurse=False):
-                                policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
-                        else:
-                            policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
-
-                        all_policy_samples.extend(policy_samples)
-                        all_reference_samples.extend(reference_samples)
-
-                        for prompt, sample in zip(eval_batch['prompt'], policy_samples):
-                            policy_text_table.add_data(self.example_counter, prompt, sample)
-                        if self.config.loss.name == 'dpo':
-                            for prompt, sample in zip(eval_batch['prompt'], reference_samples):
-                                reference_text_table.add_data(self.example_counter, prompt, sample)
-
-                mean_eval_metrics = {k: sum(v) / len(v) for k, v in all_eval_metrics.items()}
-                rank0_print(f'eval after {self.example_counter}: {formatted_dict(mean_eval_metrics)}')
-                if self.config.sample_during_eval:                    
-                    rank0_print(json.dumps(all_policy_samples[:10], indent=2))
-                    if self.config.loss.name == 'dpo':
-                        rank0_print(json.dumps(all_reference_samples[:10], indent=2))
-
-                if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_eval_metrics, step=self.example_counter)
-
-                    if self.config.sample_during_eval:
-                        wandb.log({"policy_samples": policy_text_table}, step=self.example_counter)
-                        if self.config.loss.name == 'dpo':
-                            wandb.log({"reference_samples": reference_text_table}, step=self.example_counter)
-
-                if self.example_counter > 0:
-                    if self.config.debug:
-                        rank0_print('skipping save in debug mode')
-                    else:
-                        output_dir = os.path.join(self.run_dir, f'step-{self.example_counter}')
-                        rank0_print(f'creating checkpoint to write to {output_dir}...')
-                        self.save(output_dir, mean_eval_metrics)
-            #### END EVALUATION ####
-
-            #### BEGIN TRAINING ####
-            self.policy.train()
-
-            start_time = time.time()
-            batch_metrics = defaultdict(list)
-            for microbatch_idx in range(self.config.gradient_accumulation_steps):
-                global_microbatch = slice_and_move_batch_for_device(batch, microbatch_idx, self.config.gradient_accumulation_steps, self.rank)
-                local_microbatch = slice_and_move_batch_for_device(global_microbatch, self.rank, self.world_size, self.rank)
-                loss, metrics = self.get_batch_metrics(local_microbatch, self.config.loss, train=True)
-                (loss / self.config.gradient_accumulation_steps).backward()
-
-                for k, v in metrics.items():
-                    batch_metrics[k].extend(v)
-
-            grad_norm = self.clip_gradient()
-            self.optimizer.step()
-            self.scheduler.step()
-            self.optimizer.zero_grad()
-
-            step_time = time.time() - start_time
-            examples_per_second = self.config.batch_size / step_time
-            batch_metrics['examples_per_second'].append(examples_per_second)
-            batch_metrics['grad_norm'].append(grad_norm)
-
-            self.batch_counter += 1
-            self.example_counter += self.config.batch_size
-
-            if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
-                mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
-                mean_train_metrics['counters/examples'] = self.example_counter
-                mean_train_metrics['counters/updates'] = self.batch_counter
-                rank0_print(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
-
-                if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_train_metrics, step=self.example_counter)
-
-                last_log = time.time()
-            else:
-                rank0_print(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
-            #### END TRAINING ####
-            if self.example_counter > 20000:
-                break
-            
-        rank0_print('Training complete!')
-        new_data = {"Prompt":[], "positive_response":[], "negative_response":[]}
-        for batch in self.train_iterator:
-            with torch.no_grad():
-                chosen_generated_ids = self.policy.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
-                chosen_generated_texts = self.tokenizer.batch_decode(chosen_generated_ids, skip_special_tokens=True)
-                rejected_generated_ids = self.reference_model.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
-                rejected_generated_texts = self.tokenizer.batch_decode(rejected_generated_ids, skip_special_tokens=True)
-            new_data["Prompt"].extend(batch["prompt"])
-            new_data["positive_response"].extend(chosen_generated_texts)
-            new_data["negative_response"].extend(rejected_generated_texts)
-
-        new_df = pd.DataFrame(new_data)
-        new_df.to_csv("misc/imdb_rlhf_pairs_itertwo.csv", index=False)
-        self.train_iterator = list(get_batch_iterator(**self.data_iterator_kwargs, split='train', n_epochs=self.config.n_epochs, n_examples=self.config.n_examples, batch_size=self.config.batch_size, cache_dir="misc/imdb_rlhf_pairs_itertwo.csv"))
-        self.reference_model = self.policy
-        
-        for batch in self.train_iterator:
-            #### BEGIN EVALUATION ####
-            if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
-                rank0_print(f'Running evaluation after {self.example_counter} train examples')
-                self.policy.eval()
-
-                all_eval_metrics = defaultdict(list)
-                if self.config.sample_during_eval:
-                    all_policy_samples, all_reference_samples = [], []
-                    policy_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-                    if self.config.loss.name == 'dpo':
-                        reference_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-
-                for eval_batch in (tqdm.tqdm(self.eval_iterator) if self.rank == 0 else self.eval_iterator):
-                    local_eval_batch = slice_and_move_batch_for_device(eval_batch, self.rank, self.world_size, self.rank)
-                    with torch.no_grad():
-                        _, eval_metrics = self.get_batch_metrics(local_eval_batch, self.config.loss, train=False)
-
-                    for k, v in eval_metrics.items():
-                        all_eval_metrics[k].extend(v)
-
-                    if self.config.sample_during_eval:
-                        if 'FSDP' in self.config.trainer:
-                            with FSDP.summon_full_params(self.policy, writeback=False, recurse=False):
-                                policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
-                        else:
-                            policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
-
-                        all_policy_samples.extend(policy_samples)
-                        all_reference_samples.extend(reference_samples)
-
-                        for prompt, sample in zip(eval_batch['prompt'], policy_samples):
-                            policy_text_table.add_data(self.example_counter, prompt, sample)
-                        if self.config.loss.name == 'dpo':
-                            for prompt, sample in zip(eval_batch['prompt'], reference_samples):
-                                reference_text_table.add_data(self.example_counter, prompt, sample)
-
-                mean_eval_metrics = {k: sum(v) / len(v) for k, v in all_eval_metrics.items()}
-                rank0_print(f'eval after {self.example_counter}: {formatted_dict(mean_eval_metrics)}')
-                if self.config.sample_during_eval:                    
-                    rank0_print(json.dumps(all_policy_samples[:10], indent=2))
-                    if self.config.loss.name == 'dpo':
-                        rank0_print(json.dumps(all_reference_samples[:10], indent=2))
-
-                if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_eval_metrics, step=self.example_counter)
-
-                    if self.config.sample_during_eval:
-                        wandb.log({"policy_samples": policy_text_table}, step=self.example_counter)
-                        if self.config.loss.name == 'dpo':
-                            wandb.log({"reference_samples": reference_text_table}, step=self.example_counter)
-
-                if self.example_counter > 0:
-                    if self.config.debug:
-                        rank0_print('skipping save in debug mode')
-                    else:
-                        output_dir = os.path.join(self.run_dir, f'step-{self.example_counter}')
-                        rank0_print(f'creating checkpoint to write to {output_dir}...')
-                        self.save(output_dir, mean_eval_metrics)
-            #### END EVALUATION ####
-
-            #### BEGIN TRAINING ####
-            self.policy.train()
-
-            start_time = time.time()
-            batch_metrics = defaultdict(list)
-            for microbatch_idx in range(self.config.gradient_accumulation_steps):
-                global_microbatch = slice_and_move_batch_for_device(batch, microbatch_idx, self.config.gradient_accumulation_steps, self.rank)
-                local_microbatch = slice_and_move_batch_for_device(global_microbatch, self.rank, self.world_size, self.rank)
-                loss, metrics = self.get_batch_metrics(local_microbatch, self.config.loss, train=True)
-                (loss / self.config.gradient_accumulation_steps).backward()
-
-                for k, v in metrics.items():
-                    batch_metrics[k].extend(v)
-
-            grad_norm = self.clip_gradient()
-            self.optimizer.step()
-            self.scheduler.step()
-            self.optimizer.zero_grad()
-
-            step_time = time.time() - start_time
-            examples_per_second = self.config.batch_size / step_time
-            batch_metrics['examples_per_second'].append(examples_per_second)
-            batch_metrics['grad_norm'].append(grad_norm)
-
-            self.batch_counter += 1
-            self.example_counter += self.config.batch_size
-
-            if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
-                mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
-                mean_train_metrics['counters/examples'] = self.example_counter
-                mean_train_metrics['counters/updates'] = self.batch_counter
-                rank0_print(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
-
-                if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_train_metrics, step=self.example_counter)
-
-                last_log = time.time()
-            else:
-                rank0_print(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
-            #### END TRAINING ####
-            if self.example_counter > 30000:
-                break
-            
-        rank0_print('Training complete!')
-        new_data = {"Prompt":[], "positive_response":[], "negative_response":[]}
-        for batch in self.train_iterator:
-            with torch.no_grad():
-                chosen_generated_ids = self.policy.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
-                chosen_generated_texts = self.tokenizer.batch_decode(chosen_generated_ids, skip_special_tokens=True)
-                rejected_generated_ids = self.reference_model.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
-                rejected_generated_texts = self.tokenizer.batch_decode(rejected_generated_ids, skip_special_tokens=True)
-            new_data["Prompt"].extend(batch["prompt"])
-            new_data["positive_response"].extend(chosen_generated_texts)
-            new_data["negative_response"].extend(rejected_generated_texts)
-
-        new_df = pd.DataFrame(new_data)
-        new_df.to_csv("misc/imdb_rlhf_pairs_iterthree.csv", index=False)
-        self.train_iterator = list(get_batch_iterator(**self.data_iterator_kwargs, split='train', n_epochs=self.config.n_epochs, n_examples=self.config.n_examples, batch_size=self.config.batch_size, cache_dir="misc/imdb_rlhf_pairs_iterthree.csv"))
-        self.reference_model = self.policy
-        
-        for batch in self.train_iterator:
-            #### BEGIN EVALUATION ####
-            if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
-                rank0_print(f'Running evaluation after {self.example_counter} train examples')
-                self.policy.eval()
-
-                all_eval_metrics = defaultdict(list)
-                if self.config.sample_during_eval:
-                    all_policy_samples, all_reference_samples = [], []
-                    policy_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-                    if self.config.loss.name == 'dpo':
-                        reference_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-
-                for eval_batch in (tqdm.tqdm(self.eval_iterator) if self.rank == 0 else self.eval_iterator):
-                    local_eval_batch = slice_and_move_batch_for_device(eval_batch, self.rank, self.world_size, self.rank)
-                    with torch.no_grad():
-                        _, eval_metrics = self.get_batch_metrics(local_eval_batch, self.config.loss, train=False)
-
-                    for k, v in eval_metrics.items():
-                        all_eval_metrics[k].extend(v)
-
-                    if self.config.sample_during_eval:
-                        if 'FSDP' in self.config.trainer:
-                            with FSDP.summon_full_params(self.policy, writeback=False, recurse=False):
-                                policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
-                        else:
-                            policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
-
-                        all_policy_samples.extend(policy_samples)
-                        all_reference_samples.extend(reference_samples)
-
-                        for prompt, sample in zip(eval_batch['prompt'], policy_samples):
-                            policy_text_table.add_data(self.example_counter, prompt, sample)
-                        if self.config.loss.name == 'dpo':
-                            for prompt, sample in zip(eval_batch['prompt'], reference_samples):
-                                reference_text_table.add_data(self.example_counter, prompt, sample)
-
-                mean_eval_metrics = {k: sum(v) / len(v) for k, v in all_eval_metrics.items()}
-                rank0_print(f'eval after {self.example_counter}: {formatted_dict(mean_eval_metrics)}')
-                if self.config.sample_during_eval:                    
-                    rank0_print(json.dumps(all_policy_samples[:10], indent=2))
-                    if self.config.loss.name == 'dpo':
-                        rank0_print(json.dumps(all_reference_samples[:10], indent=2))
-
-                if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_eval_metrics, step=self.example_counter)
-
-                    if self.config.sample_during_eval:
-                        wandb.log({"policy_samples": policy_text_table}, step=self.example_counter)
-                        if self.config.loss.name == 'dpo':
-                            wandb.log({"reference_samples": reference_text_table}, step=self.example_counter)
-
-                if self.example_counter > 0:
-                    if self.config.debug:
-                        rank0_print('skipping save in debug mode')
-                    else:
-                        output_dir = os.path.join(self.run_dir, f'step-{self.example_counter}')
-                        rank0_print(f'creating checkpoint to write to {output_dir}...')
-                        self.save(output_dir, mean_eval_metrics)
-            #### END EVALUATION ####
-
-            #### BEGIN TRAINING ####
-            self.policy.train()
-
-            start_time = time.time()
-            batch_metrics = defaultdict(list)
-            for microbatch_idx in range(self.config.gradient_accumulation_steps):
-                global_microbatch = slice_and_move_batch_for_device(batch, microbatch_idx, self.config.gradient_accumulation_steps, self.rank)
-                local_microbatch = slice_and_move_batch_for_device(global_microbatch, self.rank, self.world_size, self.rank)
-                loss, metrics = self.get_batch_metrics(local_microbatch, self.config.loss, train=True)
-                (loss / self.config.gradient_accumulation_steps).backward()
-
-                for k, v in metrics.items():
-                    batch_metrics[k].extend(v)
-
-            grad_norm = self.clip_gradient()
-            self.optimizer.step()
-            self.scheduler.step()
-            self.optimizer.zero_grad()
-
-            step_time = time.time() - start_time
-            examples_per_second = self.config.batch_size / step_time
-            batch_metrics['examples_per_second'].append(examples_per_second)
-            batch_metrics['grad_norm'].append(grad_norm)
-
-            self.batch_counter += 1
-            self.example_counter += self.config.batch_size
-
-            if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
-                mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
-                mean_train_metrics['counters/examples'] = self.example_counter
-                mean_train_metrics['counters/updates'] = self.batch_counter
-                rank0_print(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
-
-                if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_train_metrics, step=self.example_counter)
-
-                last_log = time.time()
-            else:
-                rank0_print(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
-            #### END TRAINING ####
-            if self.example_counter > 40000:
-                break
-            
-        rank0_print('Training complete!')
-        new_data = {"Prompt":[], "positive_response":[], "negative_response":[]}
-        for batch in self.train_iterator:
-            with torch.no_grad():
-                chosen_generated_ids = self.policy.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
-                chosen_generated_texts = self.tokenizer.batch_decode(chosen_generated_ids, skip_special_tokens=True)
-                rejected_generated_ids = self.reference_model.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
-                rejected_generated_texts = self.tokenizer.batch_decode(rejected_generated_ids, skip_special_tokens=True)
-            new_data["Prompt"].extend(batch["prompt"])
-            new_data["positive_response"].extend(chosen_generated_texts)
-            new_data["negative_response"].extend(rejected_generated_texts)
-
-        new_df = pd.DataFrame(new_data)
-        new_df.to_csv("misc/imdb_rlhf_pairs_iterfour.csv", index=False)
-        self.train_iterator = list(get_batch_iterator(**self.data_iterator_kwargs, split='train', n_epochs=self.config.n_epochs, n_examples=self.config.n_examples, batch_size=self.config.batch_size, cache_dir="misc/imdb_rlhf_pairs_iterfour.csv"))
-        self.reference_model = self.policy
-        
-        for batch in self.train_iterator:
-            #### BEGIN EVALUATION ####
-            if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
-                rank0_print(f'Running evaluation after {self.example_counter} train examples')
-                self.policy.eval()
-
-                all_eval_metrics = defaultdict(list)
-                if self.config.sample_during_eval:
-                    all_policy_samples, all_reference_samples = [], []
-                    policy_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-                    if self.config.loss.name == 'dpo':
-                        reference_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-
-                for eval_batch in (tqdm.tqdm(self.eval_iterator) if self.rank == 0 else self.eval_iterator):
-                    local_eval_batch = slice_and_move_batch_for_device(eval_batch, self.rank, self.world_size, self.rank)
-                    with torch.no_grad():
-                        _, eval_metrics = self.get_batch_metrics(local_eval_batch, self.config.loss, train=False)
-
-                    for k, v in eval_metrics.items():
-                        all_eval_metrics[k].extend(v)
-
-                    if self.config.sample_during_eval:
-                        if 'FSDP' in self.config.trainer:
-                            with FSDP.summon_full_params(self.policy, writeback=False, recurse=False):
-                                policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
-                        else:
-                            policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
-
-                        all_policy_samples.extend(policy_samples)
-                        all_reference_samples.extend(reference_samples)
-
-                        for prompt, sample in zip(eval_batch['prompt'], policy_samples):
-                            policy_text_table.add_data(self.example_counter, prompt, sample)
-                        if self.config.loss.name == 'dpo':
-                            for prompt, sample in zip(eval_batch['prompt'], reference_samples):
-                                reference_text_table.add_data(self.example_counter, prompt, sample)
-
-                mean_eval_metrics = {k: sum(v) / len(v) for k, v in all_eval_metrics.items()}
-                rank0_print(f'eval after {self.example_counter}: {formatted_dict(mean_eval_metrics)}')
-                if self.config.sample_during_eval:                    
-                    rank0_print(json.dumps(all_policy_samples[:10], indent=2))
-                    if self.config.loss.name == 'dpo':
-                        rank0_print(json.dumps(all_reference_samples[:10], indent=2))
-
-                if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_eval_metrics, step=self.example_counter)
-
-                    if self.config.sample_during_eval:
-                        wandb.log({"policy_samples": policy_text_table}, step=self.example_counter)
-                        if self.config.loss.name == 'dpo':
-                            wandb.log({"reference_samples": reference_text_table}, step=self.example_counter)
-
-                if self.example_counter > 0:
-                    if self.config.debug:
-                        rank0_print('skipping save in debug mode')
-                    else:
-                        output_dir = os.path.join(self.run_dir, f'step-{self.example_counter}')
-                        rank0_print(f'creating checkpoint to write to {output_dir}...')
-                        self.save(output_dir, mean_eval_metrics)
-            #### END EVALUATION ####
-
-            #### BEGIN TRAINING ####
-            self.policy.train()
-
-            start_time = time.time()
-            batch_metrics = defaultdict(list)
-            for microbatch_idx in range(self.config.gradient_accumulation_steps):
-                global_microbatch = slice_and_move_batch_for_device(batch, microbatch_idx, self.config.gradient_accumulation_steps, self.rank)
-                local_microbatch = slice_and_move_batch_for_device(global_microbatch, self.rank, self.world_size, self.rank)
-                loss, metrics = self.get_batch_metrics(local_microbatch, self.config.loss, train=True)
-                (loss / self.config.gradient_accumulation_steps).backward()
-
-                for k, v in metrics.items():
-                    batch_metrics[k].extend(v)
-
-            grad_norm = self.clip_gradient()
-            self.optimizer.step()
-            self.scheduler.step()
-            self.optimizer.zero_grad()
-
-            step_time = time.time() - start_time
-            examples_per_second = self.config.batch_size / step_time
-            batch_metrics['examples_per_second'].append(examples_per_second)
-            batch_metrics['grad_norm'].append(grad_norm)
-
-            self.batch_counter += 1
-            self.example_counter += self.config.batch_size
-
-            if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
-                mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
-                mean_train_metrics['counters/examples'] = self.example_counter
-                mean_train_metrics['counters/updates'] = self.batch_counter
-                rank0_print(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
-
-                if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_train_metrics, step=self.example_counter)
-
-                last_log = time.time()
-            else:
-                rank0_print(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
-            #### END TRAINING ####
-            # if self.example_counter > 50000:
+            # if self.example_counter > 10000:
             #     break
+            
+        rank0_print('Training complete!')
+        new_data = {"Prompt":[], "positive_response":[], "negative_response":[]}
+        for batch in self.original_data:
+            with torch.no_grad():
+                chosen_generated_ids = self.policy.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
+                chosen_generated_texts = self.tokenizer.batch_decode(chosen_generated_ids, skip_special_tokens=True)
+                rejected_generated_ids = self.reference_model.generate(batch["prompt_input_ids"].to(self.policy.device), attention_mask=batch["prompt_attention_mask"].to(self.policy.device), do_sample=True, max_length=60, pad_token_id=self.tokenizer.pad_token_id)
+                rejected_generated_texts = self.tokenizer.batch_decode(rejected_generated_ids, skip_special_tokens=True)
+            new_data["Prompt"].extend(batch["prompt"])
+            new_data["positive_response"].extend(chosen_generated_texts)
+            new_data["negative_response"].extend(rejected_generated_texts)
+
+        new_df = pd.DataFrame(new_data)
+        new_df.to_csv("misc/imdb_rlhf_pairs_iter"+self.iteration+".csv", index=True)
+        self.train_iterator = list(get_batch_iterator(**self.data_iterator_kwargs, split='train', n_epochs=self.config.n_epochs, n_examples=self.config.n_examples, batch_size=self.config.batch_size, cache_dir="misc/imdb_rlhf_pairs_iter"+self.iteration+".csv"))
+        self.reference_model = self.policy
 
     def clip_gradient(self):
         """Clip the gradient norm of the parameters of a non-FSDP policy."""

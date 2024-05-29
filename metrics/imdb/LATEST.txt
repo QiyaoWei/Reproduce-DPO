@@ -1,1 +1,4 @@
 Averaged reward: 0.9667727929269033
+Averaged reward: 0.6748426758868585
+Averaged reward: 0.6748426758868585
+Averaged reward: 0.6985918110688345
